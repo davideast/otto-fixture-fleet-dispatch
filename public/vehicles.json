@@ -1,0 +1,52 @@
+[
+  {
+    "vanId": "EV-104",
+    "driver": "J. Morales",
+    "route": "North Bay Express (Zone 4)",
+    "socPercent": 84,
+    "rangeMi": 162,
+    "status": "En Route",
+    "stopsRemaining": 14,
+    "bay": "—"
+  },
+  {
+    "vanId": "EV-108",
+    "driver": "R. Okonkwo",
+    "route": "Industrial Corridor (Zone 2)",
+    "socPercent": 22,
+    "rangeMi": 41,
+    "status": "Charging DCFC",
+    "stopsRemaining": 0,
+    "bay": "Bay 03 (150 kW)"
+  },
+  {
+    "vanId": "EV-112",
+    "driver": "S. Lindqvist",
+    "route": "Downtown Cold Chain (Zone 1)",
+    "socPercent": 68,
+    "rangeMi": 129,
+    "status": "En Route",
+    "stopsRemaining": 9,
+    "bay": "—"
+  },
+  {
+    "vanId": "EV-119",
+    "driver": "Unassigned",
+    "route": "Pending Afternoon Wave",
+    "socPercent": 96,
+    "rangeMi": 188,
+    "status": "Ready at Depot",
+    "stopsRemaining": 22,
+    "bay": "Bay 01 (Idle)"
+  },
+  {
+    "vanId": "EV-125",
+    "driver": "T. Nguyen",
+    "route": "Harbor Freight Loop (Zone 6)",
+    "socPercent": 15,
+    "rangeMi": 28,
+    "status": "Low Battery Alert",
+    "stopsRemaining": 3,
+    "bay": "—"
+  }
+]
