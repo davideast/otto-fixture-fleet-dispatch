@@ -17,8 +17,8 @@ The `/stitch loop` skill bridges Stitch Loop codebase intelligence with the Stit
 > 2. **Proactive Recommendation over Cold Interrogation**: Never dump blind questionnaires on the user. Inspect the workspace silently using read-only probes, formulate a clear recommendation, explain **why** that path is best, and ask the user to confirm.
 > 3. **Strict Turn-Yielding at Approval Gates**: When reaching an approval gate (Gate 0, Gate 1, Gate 2, or Gate 3), you **MUST STOP CALLING TOOLS IMMEDIATELY**. Output your orientation, findings, and recommendation, then yield the turn to wait for the user's response in chat. Never guess or chain mutating tools ahead of time.
 > 4. **CANONICAL URL RULE — NEVER GUESS OR ASSEMBLE URLS**:
->    - Stitch Canvas runs on `https://stitch.withgoogle.com` (WITHGOOGLE). It is **NOT** `stitch.google.com`.
->    - Screen deep-links use the format: `https://stitch.withgoogle.com/projects/<projectId>?node-id=<screenId>`.
+>    - Stitch Canvas runs on `https://stitch.google.com`.
+>    - Screen deep-links use the format: `https://stitch.google.com/projects/<projectId>?node-id=<screenId>`.
 >    - **Never** output raw GCP resource strings (e.g. `projects/<p>/screens/<s>`) as URLs.
 >    - **Never** guess URLs manually in prompts or replies. Always print canonical URLs using:
 >      ```bash
@@ -127,7 +127,7 @@ When the user invokes `/stitch`:
 > 
 > 1. Begin with the **Universal Orientation Anchor** (`Status: Existing Pairing Detected (Gate 0)`).
 > 2. Present the **Session Orientation Summary**:
->    - **Canvas Project**: Project Name, Project ID, and direct canvas link (`https://stitch.withgoogle.com/projects/<projectId>`).
+>    - **Canvas Project**: Project Name, Project ID, and direct canvas link (`https://stitch.google.com/projects/<projectId>`).
 >    - **Loop Workspace**: Workspace ID and bound repository (`owner/repo` on branch).
 >    - **Captured Baseline Screens**: Table of routes, screen IDs, and extraction timestamps from `.loop/manifest.json`.
 >    - **Sub-App / Monorepo Check**: If the repository contains multiple disparate frontends (e.g. `schedule/` Astro app alongside a `site/` WordPress theme), explicitly alert the user to potential context contamination.
@@ -206,7 +206,10 @@ Once the user confirms the target route:
 
 1. **Step 3A: Execute Dry-Run Browser Capture**:
    - **CLIENT-SIDE SPAS & JAVASCRIPT HYDRATION RULE**: If the application uses React, Vue, Svelte, Astro islands (`client:only`), or runtime DOM generation, **NEVER** upload raw static HTTP responses.
-   - Execute a dry-run browser capture that evaluates client JavaScript, inlines stylesheets, encodes base64 web fonts, and strips local dev scripts:
+   - **SELF-CONTAINED ASSET RULE (most common cause of a "broken" upload)**: Stitch's Web Rendering Service runs on Google infrastructure and **cannot reach your `localhost`**. A captured page that links its CSS as `<link rel="stylesheet" href="/_astro/page.css">` renders as unstyled HTML on the canvas even though it looks perfect locally. `stitch capture` therefore inlines every unreachable stylesheet, font, and image as `data:` URIs and removes `<base href>`. Publicly reachable URLs (e.g. `https://fonts.googleapis.com/...`) are intentionally left as links, since WRS fetches those natively.
+     - **Inlining base64 fonts is correct and required**, not dangerous. Self-hosted `/fonts/*.woff2` cannot be fetched by WRS, so embedding is the only way typography survives. Payloads of 81 KB through 3 MB of inline base64 `@font-face` were verified to upload and render successfully.
+     - **Verify the rendered result, not the HTTP status.** A `200` only means the screen was created. Confirm the screenshot returned by the upload actually shows your styling; a local screenshot proves nothing, because localhost assets resolve locally.
+   - Execute a dry-run browser capture that evaluates client JavaScript, waits for island hydration (`--virtual-time-budget=5000`), normalizes the 1280x800 desktop viewport, and writes `.loop/captured-dom.html`:
      ```bash
      stitch capture \
        --browser \
@@ -215,7 +218,33 @@ Once the user confirms the target route:
        -o .loop/captured-dom.html \
        --json
      ```
-   - Ensure the capture awaiting barrier (`document.fonts.ready`) has resolved so custom brand fonts (e.g. Outfit) are fully applied. For client SPAs with asynchronous data loading or mounting delays, pass `--wait-for="<selector>"` (e.g. `--wait-for="#schedule-view"` or `--wait-for=".app-shell"`) to coordinate dynamic mounting, and inspect `data.telemetry` (`hydrated`, `domNodeCount`, `textLength`). Use `--probe` for verbose telemetry.
+   - Inspect the JSON output from `stitch capture`:
+     - Verify `"warnings"` does not report an unhydrated empty shell. If an empty shell warning is present, check the rule reason (`custom-element-island`, `spa-mount-root`, or `semantic-density`) and verify the dev server route.
+     - Confirm the asset inlining telemetry in `"warnings"` (e.g. `"Inlined 1 stylesheet(s) and 3 asset(s) (~60.6 KB) so the screen renders standalone on Stitch."`). If you instead see `"Could not inline stylesheet ..."`, the screen will render unstyled — fix the dev server route before uploading.
+     - Ensure the capture awaiting barrier (`document.fonts.ready`) has resolved so custom brand fonts are fully applied. Inspect `data.telemetry` (`hydrated`, `domNodeCount`, `textLength`) or use `--probe` for verbose telemetry.
+   - **LINUX KEYRING HANG RULE**: If `--browser` capture hangs and then reports an empty DOM while the dev server shows **zero incoming requests**, Chrome is blocking on the system keyring (gnome-keyring/kwallet) during profile initialization—navigation never starts at all. `stitch capture` already passes `--password-store=basic` to prevent this. Any *manual* headless Chrome invocation on Linux must pass it too, or it will hang indefinitely.
+   - **LOADING STATE RULE (why a screen shows grey skeleton bars)**: DOM-size stability is not readiness. A page rendering skeleton placeholders reaches a stable size in ~0.5 s while the real data arrives seconds later, so a naive "DOM stopped growing" check snapshots the loading state. `stitch capture` therefore refuses to snapshot while any loading rule matches (`[aria-busy="true"]`, `[data-route-skeleton]`, `.skeleton`, `.spinner`, `[role="progressbar"]`, `[inert]`), and warns loudly if the budget expires while still loading. Tune with `--settle-timeout <ms>` (default 15000) and require specific content with `--wait-for "<selector>"`.
+   - **AUTHENTICATED CAPTURE RULE**: Headless Chrome starts with an empty profile, so an app whose content sits behind sign-in captures the *logged-out* landing page no matter how long you wait. Use `--prepare <file.js>` to drive the app into the state you want before the snapshot. The script runs in the page, may be async, and gets a `__stitchWaitFor(selector, timeoutMs)` helper:
+     ```bash
+     stitch capture --browser --url="http://localhost:<port>/" \
+       --prepare .loop/signin.js \
+       --wait-for "#meet-list" \
+       --settle-timeout 30000 \
+       --upload=false -o .loop/captured-dom.html
+     ```
+     ```js
+     // .loop/signin.js — runs inside the captured page
+     await __stitchWaitFor('#sign-in-form');
+     const set = (el, v) => {
+       Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value').set.call(el, v);
+       el.dispatchEvent(new Event('input', { bubbles: true }));
+     };
+     set(document.querySelector('#sign-in-email'), 'demo@example.test');
+     set(document.querySelector('#sign-in-password'), 'demo-password');
+     document.querySelector('#submit-sign-in').click();
+     await __stitchWaitFor('#meet-list');
+     ```
+     Native value setters plus a bubbled `input` event are required for React/Vue controlled inputs; assigning `el.value` alone does not update component state. Or use `--storage <storageState.json>` to seed cookies and localStorage prior to boot.
 
 2. **Step 3B: Render Headless 1280x800 Verification Screenshot**:
    - Render `.loop/captured-dom.html` in headless Chrome at the exact Stitch desktop canvas dimensions:
@@ -223,6 +252,7 @@ Once the user confirms the target route:
      /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
        --headless=new \
        --disable-gpu \
+       --password-store=basic \
        --window-size=1280,800 \
        --screenshot=.loop/verify-capture.png \
        .loop/captured-dom.html
@@ -258,6 +288,16 @@ Once the user approves the visual proof (or selects Option A from Gate 0):
      ```bash
      stitch loop setup
      ```
+   - **Automatic Reference Screen Reuse (Tier-0 Continuity Bridge)**:
+     - When `.loop/captured-dom.html` exists from Step 3A, `stitch loop setup` automatically reuses that exact pre-hydrated, user-approved snapshot (`source: "explicit_file"`). It **will not** probe random background ports (`5173`, `3000`, etc.) or fall back to unhydrated static build files (`dist/index.html`).
+     - If you need to override the target explicitly (or if running setup without a prior `.loop/captured-dom.html`), pass explicit target flags so background servers on `COMMON_PORTS` are never hijacked:
+       ```bash
+       stitch loop setup --file .loop/captured-dom.html
+       # OR if adopting a pre-uploaded canvas project and reference screen:
+       stitch loop setup --project-id=<projectId> --screen-id=<screenId>
+       # OR directly against a specific live route with headless browser hydration:
+       stitch loop setup --url="http://localhost:<port>/<route>" --browser
+       ```
    - Verify that setup successfully establishes:
      - Workspace pairing in `.loop/manifest.json`.
      - Remote 3-skill calibration suite (`design-synthesis`, `insight-guidelines`, `assessment-guidelines`).
@@ -319,31 +359,52 @@ Once the user approves the visual proof (or selects Option A from Gate 0):
   stitch api "workspaces/<workspaceId>/skills/<skillId>:reset" -X POST
   ```
 
-2. **Step 4B: Present the Lay of the Land (Feature Pitches from Loop Insights)**:
+2. **Step 4B: Present the Lay of the Land (Feature Pitches)**:
+   - Run `stitch status --json` to fetch synthesized insights and solutions.
+   - Inspect the returned `state` and `prototypes`:
+
+   #### Case A: Prototype Synthesis in Progress (`state === "SYNTHESIZING_PROTOTYPES"` or `prototypes: []`)
+
    > [!CRITICAL]
-   > **ZERO FABRICATED PITCHES — ALL PROTOTYPES MUST STEM FROM REAL LOOP INSIGHTS**:
-   > You are strictly forbidden from inventing, hallucinating, or synthesizing feature pitches from your own local code reading or AST inspection.
-   > 1. Run `stitch status --json` to fetch the authoritative Loop backend insights.
-   > 2. Each feature pitch card **MUST** be mapped directly from the `prototypes` array returned by `stitch status --json` (or `stitch find insights --json`):
-   >    - **Action Title**: `prototype.title` (the authoritative transformation title derived from the Loop insight)
-   >    - **Route**: `Route: ${prototype.route}`
-   >    - **Why it matters**: `prototype.whyItMatters` (the diagnosed user friction / passive detachment)
-   >    - **The Change**: `prototype.theChange` (the spatial UI composition)
-   >    - **The Payoff**: `prototype.thePayoff` (the tangible user superpower)
-   > 3. **If `state === "SYNTHESIZING_PROTOTYPES"` or `prototypes` is empty**:
-   >    - **DO NOT** invent pitches or fall back to guessing features from local source code.
-   >    - Output the Universal Orientation Anchor (`Status: Prototyping - Synthesizing Insights (Phase 4)`).
-   >    - Inform the user: *"Loop is actively analyzing your repository and synthesizing insights for your priority goal. Waiting for Loop insights..."*
-   >    - Run `stitch find insights --json` or poll `stitch status --json` until the Loop backend finishes synthesizing insights and `prototypes` is populated.
-   > 4. Present the discovered prototypes following this exact structure:
+   > **STRICT PROHIBITION (ZERO FABRICATED PITCHES — Finding F-fbc752)**:
+   > You are **strictly forbidden** from inventing, mocking, or synthesizing feature pitches from local code, package files, ASTs, or git history when `prototypes` is empty.
+   > In finding F-fbc752, when `stitch status --json` returned `prototypes: []` because Loop was actively synthesizing prototypes, the agent hallucinated 5 fake feature pitches from local code reading. Fabricating pitches violates the core design contract, invents ungrounded canvas baselines, and disconnects the user from authoritative Stitch Loop intelligence.
+   > When `prototypes` is empty or `state === "SYNTHESIZING_PROTOTYPES"`, you **must not guess or manufacture any prototype pitches**. Follow the concrete action below.
+
+   **CONCRETE ACTION WHILE SYNTHESIZING**:
+   1. **Universal Orientation Anchor**:
+      Output the mandatory Universal Orientation Anchor with `Status: Prototyping (Phase 4 - Synthesizing)`.
+   2. **Inform User of Active Synthesis**:
+      Inform the user clearly that Stitch Loop is actively analyzing their codebase and synthesizing prototypes for the workspace.
+   3. **Report Environment & Metadata**:
+      Report the responding environment (`environment.target` / `environment.baseUrl`), workspace ID (`workspaceId`), and reference screen ID (`stitch.referenceScreenId`).
+   4. **Clear User Guidance**:
+      - Advise that backend prototype synthesis typically completes in 30–60 seconds.
+      - Offer to poll `stitch status --json` again shortly.
+      - Invite the user to share any specific design priorities, key user flows, or routes they want prioritized while synthesis completes.
+   5. **🛑 STOP CALLING TOOLS & YIELD TURN**:
+      Do not enter a busy polling loop or chain further tool calls. Stop calling tools immediately and yield the turn to wait for the user's response in chat.
+
+   ---
+
+   #### Case B: Ready Prototypes (`state === "READY"` and `prototypes.length > 0`)
+
+   When `stitch status --json` returns ready prototypes:
+   - Begin with the **Universal Orientation Anchor** (`Status: Prototyping (Phase 4)`).
+   - Present the discovered prototypes following this exact structure:
      1. **Header Badge**: Top metadata receded: `*repo (branch) · workspace-id*`
      2. **Title**: `# What do you want to create?`
-     3. **Context Line**: *"Here are the UI features and page transformations discovered by Loop from your codebase:"*
-     4. **Feature Pitch Cards (1 to N)**: Render each prototype directly from `data.prototypes`.
+     3. **Context Line**: *"Here are the UI features and page transformations discovered from your codebase:"*
+     4. **Feature Pitch Cards (1 to 5)**:
+        - **Action Title**: Authoritative imperative sentence locating the page and naming the transformation.
+        - **Route**: Dedicated line beneath title (`Route: /chapters`).
+        - **Why it matters**: 1-2 sentences explaining what is painful, static, or missing on this screen today.
+        - **The Change**: Describe where the new UI sits visually on the responsive desktop canvas and how it reacts when interacted with (fluid, relational descriptions, zero pixel numbers).
+        - **The Payoff**: 1 crisp sentence explaining the tangible user superpower or time saved.
      5. **Keystroke Prompt**:
         ```markdown
         ---
-        Reply **1**, **2**, etc. to start building on canvas, or ask to drill into any prototype for more details.
+        Reply **1**, **2**, **3**, **4**, or **5** to start building on canvas, or ask to drill into any prototype for more details.
         ```
    - **🛑 YIELD TURN**: Stop calling tools and let the user pick a prototype.
 
